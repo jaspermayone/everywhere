@@ -1,33 +1,24 @@
 {
-  "name": "socalwizard",
-  "version": "1.0.0",
-  "description": "",
-  "main": "src/index.ts",
-  "author": "Jasper Mayone <me@jaspermayone.com>",
-  "license": "",
+  "name": "socialposter",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
   "scripts": {
-    "dev": "ts-node-dev --respawn src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
   },
-  "keywords": [],
   "devDependencies": {
-    "@types/multer": "^1.4.12",
-    "typescript": "^5.6.3"
+    "typescript": "~5.6.2",
+    "vite": "^5.4.10"
   },
   "dependencies": {
     "@atproto/api": "^0.13.16",
-    "@atproto/oauth-client-node": "^0.2.1",
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.9.0",
-    "axios": "^1.7.7",
+    "@types/multer": "^1.4.12",
     "body-parser": "^1.20.3",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
-    "express-serve-static-core": "^0.1.1",
-    "form-data": "^4.0.1",
-    "multer": "1.4.5-lts.1",
-    "sharp": "^0.33.5",
-    "ts-node-dev": "^2.0.0"
+    "multer": "^1.4.5-lts.1",
+    "sharp": "^0.33.5"
   }
 }
