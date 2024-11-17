@@ -1,11 +1,14 @@
 import express, { Request, Response, NextFunction } from "express";
 import multer from "multer";
 import dotenv from "dotenv";
-import { json } from "body-parser";
+import bodyParser from "body-parser";
 import fs from "fs";
 import path from "path";
 import sharp from "sharp";
-import { BlueskyService, BlueskyConfig } from "./services/bluesky.service";
+import { BlueskyService, BlueskyConfig } from "../lib/services/bluesky.ts";
+import { PreviewServer, type ViteDevServer } from "vite";
+
+const { json } = bodyParser;
 
 // Load environment variables
 dotenv.config();
@@ -144,8 +147,7 @@ const ensureAuthenticated = async (
 };
 
 // Unified post endpoint with proper typing
-app.post(
-  "/api/post",
+app.post("/api/post",
   checkCredentials,
   ensureAuthenticated,
   upload.array("images", 4),
@@ -230,25 +232,20 @@ app.post(
   }) as express.RequestHandler,
 );
 
-// Health check endpoint
-app.get("/health", (req: Request, res: Response) => {
-  res.status(200).json({
-    status: "healthy",
-    authenticated: blueskyService.getAuthStatus(),
-  });
-});
-
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, "../uploads");
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir);
 }
 
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  blueskyService.authenticate(); // Initial authentication attempt
-});
-
-export default app;
+export default () => ({
+  name: 'api',
+  configureServer(server: ViteDevServer) {
+    // @ts-expect-error
+    server.middlewares.use((req, res, next) => app(req,res,next))
+  },
+  configurePreviewServer(server: PreviewServer) {
+    // @ts-expect-error
+    server.middlewares.use((req, res, next) => app(req,res,next))
+  }
+})
