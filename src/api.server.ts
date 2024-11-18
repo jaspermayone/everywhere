@@ -1,24 +1,33 @@
-import express, { Request, Response, NextFunction } from "express";
-import multer from "multer";
-import dotenv from "dotenv";
 import bodyParser from "body-parser";
+import dotenv from "dotenv";
+import express, { NextFunction, Request, Response } from "express";
 import fs from "fs";
+import multer from "multer";
 import path from "path";
-import sharp from "sharp";
-import { BlueskyService, BlueskyConfig } from "../lib/services/bluesky.ts";
 import { PreviewServer, type ViteDevServer } from "vite";
+import { BlueskyConfig, BlueskyService } from "../lib/services/bluesky.ts";
+import { TwitterConfig, TwitterService } from "../lib/services/twitter.ts";
+import { cleanupFiles } from "../lib/common/cleanupFiles.ts";
+import { checkServices } from "../lib/middleware/checkServices.ts";
+import { processImage } from "../lib/common/processImage.ts";
 
 const { json } = bodyParser;
 
 // Load environment variables
 dotenv.config();
 
-const MAX_FILE_SIZE = 975 * 1024; // ~975KB to be safe
-const MAX_IMAGE_DIMENSION = 2000; // Max dimension for width or height
+const TWITTER_MAX_FILES = 4;
+const BLUESKY_MAX_FILES = 4;
 
-// Extend Express Request with multer types
 interface MulterRequest extends Request {
   files: Express.Multer.File[];
+}
+
+interface PostResponse {
+  platform: string;
+  success: boolean;
+  error?: string;
+  data?: any;
 }
 
 // Configure multer for file uploads
@@ -26,7 +35,7 @@ const upload = multer({
   dest: "uploads/",
   limits: {
     fileSize: 1024 * 1024 * 10, // 10MB limit initially (we'll resize later)
-    files: 4, // Maximum 4 files (Bluesky's limit)
+    files: Math.max(TWITTER_MAX_FILES, BLUESKY_MAX_FILES),
   },
   fileFilter: (req, file, cb) => {
     const allowedTypes = ["image/jpeg", "image/png", "image/gif"];
@@ -42,120 +51,35 @@ const upload = multer({
 const app = express();
 app.use(json());
 
-// Initialize Bluesky service
+// Initialize services
 const blueskyConfig: BlueskyConfig = {
   service: "https://bsky.social",
   identifier: process.env.BLUESKY_IDENTIFIER || "",
   password: process.env.BLUESKY_PASSWORD || "",
 };
 
+const twitterConfig: TwitterConfig = {
+  consumerKey: process.env.TWITTER_API_KEY!,
+  consumerSecret: process.env.TWITTER_KEY_SECRET!,
+};
+
 const blueskyService = new BlueskyService(blueskyConfig);
-
-// Helper function to process and resize image
-async function processImage(
-  inputPath: string,
-  outputPath: string,
-  mimeType: string,
-): Promise<void> {
-  let image = sharp(inputPath);
-  const metadata = await image.metadata();
-
-  // Resize if dimensions are too large
-  if (metadata.width && metadata.height) {
-    const maxDim = Math.max(metadata.width, metadata.height);
-    if (maxDim > MAX_IMAGE_DIMENSION) {
-      const ratio = MAX_IMAGE_DIMENSION / maxDim;
-      image = image.resize(
-        Math.round(metadata.width * ratio),
-        Math.round(metadata.height * ratio),
-        {
-          fit: "inside",
-          withoutEnlargement: true,
-        },
-      );
-    }
-  }
-
-  // Set quality based on mime type
-  if (mimeType === "image/jpeg") {
-    image = image.jpeg({ quality: 80 });
-  } else if (mimeType === "image/png") {
-    image = image.png({ quality: 80 });
-  }
-
-  await image.toFile(outputPath);
-
-  // Check if file is still too large
-  const stats = await fs.promises.stat(outputPath);
-  if (stats.size > MAX_FILE_SIZE) {
-    // If still too large, reduce quality further
-    image = sharp(outputPath);
-    if (mimeType === "image/jpeg" || mimeType === "image/png") {
-      const quality = Math.floor((MAX_FILE_SIZE / stats.size) * 70);
-      if (mimeType === "image/jpeg") {
-        image = image.jpeg({ quality });
-      } else {
-        image = image.png({ quality });
-      }
-      await image.toFile(outputPath);
-    }
-  }
-}
-
-// Helper function to clean up files
-async function cleanupFiles(files: string[]): Promise<void> {
-  for (const file of files) {
-    try {
-      await fs.promises.unlink(file);
-    } catch (err) {
-      console.error("Error deleting file:", file, err);
-    }
-  }
-}
-
-// Authentication middleware
-const checkCredentials = (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void => {
-  if (!blueskyService.validateConfig()) {
-    res.status(500).json({ error: "Bluesky credentials not configured" });
-    return;
-  }
-  next();
-};
-
-const ensureAuthenticated = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> => {
-  if (!blueskyService.getAuthStatus()) {
-    try {
-      await blueskyService.authenticate();
-      if (!blueskyService.getAuthStatus()) {
-        res.status(401).json({ error: "Failed to authenticate with Bluesky" });
-        return;
-      }
-    } catch (error) {
-      res.status(401).json({ error: "Authentication failed" });
-      return;
-    }
-  }
-  next();
-};
+const twitterService = new TwitterService(twitterConfig);
 
 // Unified post endpoint with proper typing
-app.post("/api/post",
-  checkCredentials,
-  ensureAuthenticated,
-  upload.array("images", 4),
+app.post(
+  "/api/post",
+  (req: Request, res: Response, next: NextFunction) =>
+    checkServices(req, res, next, blueskyService, twitterService),
+  upload.array("images", Math.max(TWITTER_MAX_FILES, BLUESKY_MAX_FILES)),
   (async (req: Request, res: Response) => {
     const filesToCleanup: string[] = [];
     try {
       const { text, altTexts } = req.body;
       const files = (req as MulterRequest).files || [];
+      const services = ((req.query.services as string) || "bluesky,twitter")
+        .toLowerCase()
+        .split(",");
 
       if (!text) {
         res.status(400).json({ error: "Text content is required" });
@@ -173,61 +97,108 @@ app.post("/api/post",
         parsedAltTexts = altTexts ? [altTexts] : [];
       }
 
-      // Base post options
-      const postOptions: any = {
-        text,
-        createdAt: new Date().toISOString(),
-      };
+      const responses: PostResponse[] = [];
 
-      // Process and upload images
-      if (files.length > 0) {
+      // Process files once for both services
+      const processedFiles = await Promise.all(
+        files.map(async (file) => {
+          const processedPath = `${file.path}_processed`;
+          filesToCleanup.push(processedPath);
+          await processImage(file.path, processedPath, file.mimetype);
+          return { path: processedPath, mimetype: file.mimetype };
+        }),
+      );
+
+      // Post to Bluesky if requested
+      if (services.includes("bluesky")) {
         try {
-          const processedFiles = await Promise.all(
-            files.map(async (file, index) => {
-              const processedPath = `${file.path}_processed`;
-              filesToCleanup.push(processedPath);
-              await processImage(file.path, processedPath, file.mimetype);
-              return { path: processedPath, mimetype: file.mimetype };
-            }),
-          );
-
+          const blueskyFiles = processedFiles.slice(0, BLUESKY_MAX_FILES);
           const blobResponses = await Promise.all(
-            processedFiles.map((file) =>
+            blueskyFiles.map((file) =>
               blueskyService.uploadImage(file.path, file.mimetype),
             ),
           );
 
-          postOptions.embed = {
-            $type: "app.bsky.embed.images",
-            images: blobResponses.map((response, index) => ({
-              image: response.data.blob,
-              alt: parsedAltTexts[index] || text.substring(0, 300),
-            })),
+          const postOptions = {
+            text,
+            createdAt: new Date().toISOString(),
+            embed:
+              blueskyFiles.length > 0
+                ? {
+                    $type: "app.bsky.embed.images",
+                    images: blobResponses.map((response, index) => ({
+                      image: response.data.blob,
+                      alt: parsedAltTexts[index] || text.substring(0, 300),
+                    })),
+                  }
+                : undefined,
           };
+
+          const response = await blueskyService.createPost(postOptions);
+          responses.push({
+            platform: "bluesky",
+            success: true,
+            data: { uri: response.uri, cid: response.cid },
+          });
         } catch (error) {
-          console.error("Error processing/uploading images:", error);
-          await cleanupFiles(filesToCleanup);
-          res.status(500).json({ error: "Failed to process or upload images" });
-          return;
+          console.error("Bluesky post error:", error);
+          responses.push({
+            platform: "bluesky",
+            success: false,
+            error: error.message,
+          });
         }
       }
 
-      // Create the post
-      const response = await blueskyService.createPost(postOptions);
+      // Post to Twitter if requested
+      if (services.includes("twitter")) {
+        try {
+          const twitterFiles = processedFiles.slice(0, TWITTER_MAX_FILES);
+          let mediaIds: string[] = [];
+
+          if (twitterFiles.length > 0) {
+            mediaIds = await Promise.all(
+              twitterFiles.map((file) => twitterService.uploadMedia(file.path)),
+            );
+          }
+
+          const tweetResponse = await twitterService.createPost(text, mediaIds);
+          responses.push({
+            platform: "twitter",
+            success: true,
+            data: tweetResponse,
+          });
+        } catch (error) {
+          console.error("Twitter post error:", error);
+          responses.push({
+            platform: "twitter",
+            success: false,
+            error: error.message,
+          });
+        }
+      }
 
       // Clean up all files
       await cleanupFiles(filesToCleanup);
 
+      // If all posts failed, return 500
+      if (responses.every((r) => !r.success)) {
+        res.status(500).json({
+          error: "All posts failed",
+          details: responses,
+        });
+        return;
+      }
+
       res.status(201).json({
-        message: "Post created successfully",
-        uri: response.uri,
-        cid: response.cid,
+        message: "Posts created",
+        responses,
         imageCount: files.length,
       });
     } catch (error) {
-      console.error("Error creating post:", error);
+      console.error("Error creating posts:", error);
       await cleanupFiles(filesToCleanup);
-      res.status(500).json({ error: "Failed to create post" });
+      res.status(500).json({ error: "Failed to create posts" });
     }
   }) as express.RequestHandler,
 );
@@ -239,13 +210,11 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 export default () => ({
-  name: 'api',
+  name: "api",
   configureServer(server: ViteDevServer) {
-    // @ts-expect-error
-    server.middlewares.use((req, res, next) => app(req,res,next))
+    server.middlewares.use((req, res, next) => app(req, res, next));
   },
   configurePreviewServer(server: PreviewServer) {
-    // @ts-expect-error
-    server.middlewares.use((req, res, next) => app(req,res,next))
-  }
-})
+    server.middlewares.use((req, res, next) => app(req, res, next));
+  },
+});
