@@ -1,20 +1,17 @@
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response } from "express";
 import multer from "multer";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
 import fs from "fs";
 import path from "path";
-import sharp from "sharp";
-import { BlueskyService, BlueskyConfig } from "../lib/services/bluesky.ts";
+import { BlueskyService } from "../lib/services/bluesky.ts";
 import { PreviewServer, type ViteDevServer } from "vite";
+import { processImage, cleanupFiles } from "../lib/utils.ts"
 
 const { json } = bodyParser;
 
 // Load environment variables
 dotenv.config();
-
-const MAX_FILE_SIZE = 975 * 1024; // ~975KB to be safe
-const MAX_IMAGE_DIMENSION = 2000; // Max dimension for width or height
 
 // Extend Express Request with multer types
 interface MulterRequest extends Request {
@@ -42,114 +39,15 @@ const upload = multer({
 const app = express();
 app.use(json());
 
-// Initialize Bluesky service
-const blueskyConfig: BlueskyConfig = {
+const blueskyService = new BlueskyService({
   service: "https://bsky.social",
   identifier: process.env.BLUESKY_IDENTIFIER || "",
   password: process.env.BLUESKY_PASSWORD || "",
-};
-
-const blueskyService = new BlueskyService(blueskyConfig);
-
-// Helper function to process and resize image
-async function processImage(
-  inputPath: string,
-  outputPath: string,
-  mimeType: string,
-): Promise<void> {
-  let image = sharp(inputPath);
-  const metadata = await image.metadata();
-
-  // Resize if dimensions are too large
-  if (metadata.width && metadata.height) {
-    const maxDim = Math.max(metadata.width, metadata.height);
-    if (maxDim > MAX_IMAGE_DIMENSION) {
-      const ratio = MAX_IMAGE_DIMENSION / maxDim;
-      image = image.resize(
-        Math.round(metadata.width * ratio),
-        Math.round(metadata.height * ratio),
-        {
-          fit: "inside",
-          withoutEnlargement: true,
-        },
-      );
-    }
-  }
-
-  // Set quality based on mime type
-  if (mimeType === "image/jpeg") {
-    image = image.jpeg({ quality: 80 });
-  } else if (mimeType === "image/png") {
-    image = image.png({ quality: 80 });
-  }
-
-  await image.toFile(outputPath);
-
-  // Check if file is still too large
-  const stats = await fs.promises.stat(outputPath);
-  if (stats.size > MAX_FILE_SIZE) {
-    // If still too large, reduce quality further
-    image = sharp(outputPath);
-    if (mimeType === "image/jpeg" || mimeType === "image/png") {
-      const quality = Math.floor((MAX_FILE_SIZE / stats.size) * 70);
-      if (mimeType === "image/jpeg") {
-        image = image.jpeg({ quality });
-      } else {
-        image = image.png({ quality });
-      }
-      await image.toFile(outputPath);
-    }
-  }
-}
-
-// Helper function to clean up files
-async function cleanupFiles(files: string[]): Promise<void> {
-  for (const file of files) {
-    try {
-      await fs.promises.unlink(file);
-    } catch (err) {
-      console.error("Error deleting file:", file, err);
-    }
-  }
-}
-
-// Authentication middleware
-const checkCredentials = (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void => {
-  if (!blueskyService.validateConfig()) {
-    res.status(500).json({ error: "Bluesky credentials not configured" });
-    return;
-  }
-  next();
-};
-
-const ensureAuthenticated = async (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> => {
-  if (!blueskyService.getAuthStatus()) {
-    try {
-      await blueskyService.authenticate();
-      if (!blueskyService.getAuthStatus()) {
-        res.status(401).json({ error: "Failed to authenticate with Bluesky" });
-        return;
-      }
-    } catch (error) {
-      res.status(401).json({ error: "Authentication failed" });
-      return;
-    }
-  }
-  next();
-};
+});
 
 // Unified post endpoint with proper typing
 app.post("/api/post",
-  checkCredentials,
-  ensureAuthenticated,
+  blueskyService.ensureAuthenticated,
   upload.array("images", 4),
   (async (req: Request, res: Response) => {
     const filesToCleanup: string[] = [];

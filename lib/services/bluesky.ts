@@ -1,5 +1,6 @@
 import { BskyAgent } from "@atproto/api";
 import fs from "fs";
+import { type Request, type Response, type NextFunction } from "express";
 
 export interface BlueskyConfig {
   service: string;
@@ -54,4 +55,28 @@ export class BlueskyService {
   public validateConfig(): boolean {
     return !!(this.config.identifier && this.config.password);
   }
+  
+  public async ensureAuthenticated(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.validateConfig()) {
+      res.status(500).json({ error: "Bluesky credentials not configured" });
+      return;
+    }
+    if (!this.getAuthStatus()) {
+      try {
+        await this.authenticate();
+        if (!this.getAuthStatus()) {
+          res.status(401).json({ error: "Failed to authenticate with Bluesky" });
+          return;
+        }
+      } catch (error) {
+        res.status(401).json({ error: "Authentication failed" });
+        return;
+      }
+    }
+    next();
+  };
 }
