@@ -17,7 +17,7 @@
     "@types/multer": "^1.4.12",
     "body-parser": "^1.20.3",
     "dotenv": "^16.4.5",
-    "express": "^4.21.1",
+    "express": "^4.21.2",
     "got": "^14.4.4",
     "multer": "^1.4.5-lts.1",
     "oauth-1.0a": "^2.2.6",
