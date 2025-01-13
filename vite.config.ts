@@ -1,7 +1,6 @@
-import type { UserConfig } from 'vite'
-import api from "./src/api.server.ts"
-import federation from "./src/federation.server.ts"
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
 
-export default {
-  plugins: [api(), federation()]
-} satisfies UserConfig
+export default defineConfig({
+	plugins: [sveltekit()]
+});
